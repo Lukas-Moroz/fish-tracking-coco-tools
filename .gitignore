@@ -1,0 +1,12 @@
+# Dataset files stay local
+train/
+valid/
+test/
+*.coco.json
+fish_tracking_annotations.json
+*.zip
+*.jpg
+
+__pycache__/
+*.pyc
+.DS_Store
