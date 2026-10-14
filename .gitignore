@@ -1,12 +1,26 @@
-# Dataset files stay local
-train/
-valid/
-test/
+# Source data, generated datasets, and organizer-only outputs
+/data/
+/competition_dataset/
+/annotation_audit/
+/train/
+/valid/
+/validate/
+/test/
 *.coco.json
 fish_tracking_annotations.json
+*.jsonl
 *.zip
 *.jpg
+*.jpeg
+*.png
+*.mp4
 
+# The only committed images are the bundled synthetic example.
+!/examples/dataset/**/*.png
+
+# Python and operating-system files
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
 .DS_Store

@@ -1,0 +1,26 @@
+name: Helper tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run unit and integration tests
+        run: python -m unittest discover -s tests -v
+      - name: Check participant example
+        run: python prediction_loader.py examples/dataset --split train --output /tmp/example_windows.jsonl
