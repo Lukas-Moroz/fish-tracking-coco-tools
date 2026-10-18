@@ -23,4 +23,7 @@ jobs:
       - name: Run unit and integration tests
         run: python -m unittest discover -s tests -v
       - name: Check participant example
-        run: python prediction_loader.py examples/dataset --split train --output /tmp/example_windows.jsonl
+        run: |
+          python release_dataset.py build examples/dataset --release-id demo_001 --output /tmp/demo_001/private
+          python release_dataset.py participants /tmp/demo_001/private --output /tmp/demo_001/participants
+          python prediction_loader.py /tmp/demo_001/participants --split train --output /tmp/example_windows.jsonl

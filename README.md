@@ -1,100 +1,115 @@
 # Fish tracking competition helpers
 
-This repo contains the helper functions for preparing fish-video data and loading
-motion-prediction samples. **The real competition dataset will be distributed
-separately.** A small synthetic dataset is included so you can try everything now.
+Prepare annotated video chunks, load **10 input images**, and standardize the
+**next 10 predicted centerpoints per fish** for evaluation. Teams supply their
+own models. The core helpers require Python 3.8+ and no third-party packages.
 
-## What's in this repo?
+This repository contains helper code, documentation, tests, and a small synthetic
+example. Real competition images, annotations, and withheld test data are
+distributed separately and excluded from Git.
 
-| File or folder | What it does |
+## Dataset layout
+
+Participants receive training and validation data. Test images and labels stay
+with the organizers. Every chunk has its own `annotations.json`; `manifest.json`
+indexes the chunks and fixed split assignments without combining their labels.
+
+```text
+participants/
+  manifest.json
+  train/
+    0101/
+      images/01011001.jpg ...
+      annotations.json
+  validate/
+    0102/
+      images/01022001.jpg ...
+      annotations.json
+```
+
+Photo names use **`VVCCSFFF.ext`**:
+
+| Field | Meaning |
 |---|---|
-| `prediction_loader.py` | Loads 10 past center positions and the next 10 positions for each fish |
-| `split_dataset.py` | Organizer tool: finds stable sequences and creates train/validation/test folders |
-| `examples/dataset/` | Ready-to-run synthetic data: three 40-frame shots with two moving shapes each |
-| `examples/make_example.py` | Recreates synthetic source data without extra dependencies |
-| `dataset_common.py` | Validation shared by the helper functions |
-| `docs/` | Detailed data format and instructions for organizers |
-| `tests/` | Automated checks |
-| `tools/` | Optional annotation audit for organizers |
+| `VV` | Full video ID, `01`–`99` |
+| `CC` | Chunk within that video, `01`–`99` |
+| `S` | `1` = train, `2` = validation, `3` = private test |
+| `FFF` | Frame within the chunk, starting at `001`, up to `999` |
 
-## 1. Get the repo
+For example, `01011001.jpg` is video 01, chunk 01, training, frame 001.
+The validation folder and loader split are named `validate`.
 
-You need **Python 3.8 or newer**. The main helpers need no additional packages.
+Fish IDs stay constant within a chunk and are **never reused in another chunk**,
+including chunks of the same video. The exporter remaps existing continuous-video
+annotations automatically. Images retain their original bytes and resolution;
+all boxes and centerpoints use original-image pixels.
 
-```bash
-git clone https://github.com/Lukas-Moroz/fish-tracking-coco-tools.git
-cd fish-tracking-coco-tools
-```
-
-You can also download the repo as a ZIP and open a terminal in its extracted folder.
-
-## 2. Try the included example
+## Try the synthetic example
 
 ```bash
-python3 prediction_loader.py examples/dataset --split train
+python3 release_dataset.py build examples/dataset --release-id demo_001 --output data/demo_001/private
+python3 release_dataset.py participants data/demo_001/private --output data/demo_001/participants
+python3 prediction_loader.py data/demo_001/participants --split train
 ```
 
-This prints the number of prediction samples and the first sample. The example
-has **21 samples in each split**. It uses colored shapes, not real fish footage.
+The example contains colored shapes, not real fish. Its training and validation
+splits each provide 21 windows. Outputs must not already exist.
 
-## 3. Use the loader in your code
+## Use a team's model
 
 ```python
-from prediction_loader import PredictionDataset
+from prediction_loader import PredictionDataset, predict_sample
 
-dataset = PredictionDataset("examples/dataset", "train")
+# Use the training or validation split supplied by the organizers.
+dataset = PredictionDataset("data/demo_001/participants", "train")
 sample = dataset[0]
+images = sample["input_images"]  # Ten image paths in time order
+targets = sample["future"]       # Training labels: [fish_count][10][2]
+fish_ids = sample["track_ids"]   # Required trajectory order
 
-past = sample["observed"]      # [fish_count][10][2], x/y in pixels
-target = sample["future"]     # [fish_count][10][2], x/y in pixels
-fish_ids = sample["track_ids"] # Same fish order in past and target
-
-print("Samples:", len(dataset))
-print("Fish IDs:", fish_ids)
+# Connect your team's predictor(images) before calling:
+# record = predict_sample(dataset, 0, predictor)
 ```
 
-Replace `"examples/dataset"` with the path to your official dataset when provided.
-Use `"train"`, `"validate"`, or `"test"` to select a split. Keep the organizers'
-assignments unchanged.
+`predict_sample` passes exactly ten encoded image byte strings to
+`predictor(images)`. Your adapter decodes them and returns Python lists shaped
+`[fish_count][10][2]`, in the window's `track_ids` order. Its output is the next
+ten `[x, y]` centerpoints per fish. The call supplies no center labels or future
+images. `prediction_input(index)` provides the input paths and alignment metadata.
 
-Each sample uses **10 observed frames to predict the next 10 frames**, then the
-loader slides forward by one frame. It never crosses a chunk or split boundary.
-A 30-frame chunk gives **11 samples**, each containing all fish in that chunk.
-All videos are sampled at **30 FPS**; centers are bounding-box midpoints.
+Windows advance by one frame and never cross chunk or split boundaries. A chunk
+of `N` frames gives `max(0, N - 19)` windows. Fish counts may vary between chunks.
 
-Different chunks can have different fish counts. If batching samples for a neural
-network, use custom collation or padding. Samples contain future labels; a blind
-competition's test inputs/targets require a separate organizer distribution.
+## Standardize prediction JSON
 
-## Preparing new data (organizers)
+Save your `predict_sample` records as a JSON list, then validate and standardize:
 
 ```bash
-python3 split_dataset.py "path/to/roboflow_export" --output data/official_v1
+python3 prediction_format.py team_predictions.json --dataset data/demo_001/participants --split validate --output submission.json
 ```
 
-This keeps the **largest consecutive sequences with the same annotated fish IDs
-in every frame**, with a minimum of **30 frames**. A missing or added fish box,
-frame gap, shot change, or ambiguous identity ends a sequence.
+Use records from the same split named in the command. The standardizer checks
+complete window coverage, frame alignment, fish identities, ten points per fish,
+and finite coordinates. It emits the shared submission format with the dataset's
+release ID. The [prediction contract](docs/PREDICTION_FORMAT.md) gives the full API.
+Scoring policy is defined separately by the organizers.
 
-Whole chunks are assigned to `train`, `validate`, and `test`, targeting **70:15:15
-by photo count**. At least three usable chunks are required. Ratios are approximate;
-actual counts and fixed assignments are recorded in `manifest.json`. Original
-files are preserved. Existing output directories are refused.
+## Prepare and grow the dataset
 
-Detection has one class, `fish` (`class_id=0`), plus separate `track_id` values.
-Each annotation contains only `image`, `class_id`, `track_id`, `bbox`, and `center`.
+Organizers first prepare stable chunks from COCO exports with `split_dataset.py`,
+then build a named release with `release_dataset.py`. New waves extend the prior
+private release while preserving all existing chunk files, names, IDs, and split
+assignments. The participant export copies only training and validation chunks.
 
-See [organizer instructions](docs/ORGANIZERS.md) for multiple-shot preparation,
-example regeneration, and distribution. See [data format](docs/DATA_FORMAT.md)
-for the annotation schema and prediction sample details.
+See [organizer commands](docs/ORGANIZERS.md) and the
+[annotation and manifest format](docs/DATA_FORMAT.md).
 
-## Run the tests
+## Run checks
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-Real footage, generated datasets, local audit results, and exported JSONL samples
-are excluded from Git. The bundled synthetic example is the only committed image
-data. The utility code is currently unlicensed; no open-source license has been
-selected. Official scoring rules and submission formats will be supplied separately.
+The optional source annotation audit in `tools/` needs Pillow; the competition
+helpers do not. Code and dataset licenses are separate; a code license has not
+yet been selected for this repository.

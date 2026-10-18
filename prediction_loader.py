@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 
-from dataset_common import DatasetError, SPLIT_NAMES, child_path, is_number, load_json, positive_integer
+from dataset_common import DatasetError, SPLIT_NAMES, child_path, is_number, load_json, photo_name, positive_integer
 
 
 class PredictionDataset:
@@ -29,15 +29,44 @@ class PredictionDataset:
         self.manifest = load_json(self.root / "manifest.json")
         if not isinstance(self.manifest, dict) or not isinstance(self.manifest.get("chunks"), list):
             raise DatasetError("Manifest must be an object containing a chunks list.")
-        if self.manifest.get("schema_version") != 1 or self.manifest.get("fps") != 30:
-            raise DatasetError("Expected schema_version=1 and fps=30.")
+        version = self.manifest.get("schema_version")
+        if type(version) is not int or version not in (1, 2) or self.manifest.get("fps") != 30:
+            raise DatasetError("Expected schema_version=1 or 2 and fps=30.")
+        if version == 2 and (self.manifest.get("filename_format") != "VVCCSFFF"
+                             or self.manifest.get("track_id_scope") != "globally_unique_per_chunk"
+                             or self.manifest.get("distribution") not in ("private", "participants")
+                             or not isinstance(self.manifest.get("release_id"), str)):
+            raise DatasetError("Invalid version-2 release metadata.")
+        video_registry = {}
+        if version == 2:
+            videos, waves = self.manifest.get("videos"), self.manifest.get("waves")
+            if (not isinstance(videos, list) or not isinstance(waves, list) or not waves
+                    or any(not isinstance(w, str) or not w for w in waves)
+                    or len(set(waves)) != len(waves) or waves[-1] != self.manifest["release_id"]):
+                raise DatasetError("Invalid video registry or release history.")
+            used_video_ids = set()
+            for video in videos:
+                if (not isinstance(video, dict) or not isinstance(video.get("recording_id"), str)
+                        or not video["recording_id"] or type(video.get("video_id")) is not int
+                        or not 1 <= video["video_id"] <= 99
+                        or video["video_id"] in used_video_ids or video["recording_id"] in video_registry):
+                    raise DatasetError("Video IDs and recording names must be distinct in the registry.")
+                video_registry[video["recording_id"]] = video["video_id"]
+                used_video_ids.add(video["video_id"])
+        if self.manifest.get("distribution") == "participants" and split == "test":
+            raise DatasetError("Test data is withheld from the participant package.")
         self.chunks, self.index = [], []
-        seen_paths, seen_frames = set(), set()
+        seen_paths, seen_frames, seen_tracks, seen_chunks = set(), set(), set(), set()
         # Validate all manifest chunks so a split-specific loader also catches
         # frame reuse across the other split assignments.
         for entry in self.manifest["chunks"]:
+            if entry["chunk_id"] in seen_chunks:
+                raise DatasetError(f"Repeated chunk ID: {entry['chunk_id']}")
+            seen_chunks.add(entry["chunk_id"])
             if entry["split"] not in SPLIT_NAMES:
                 raise DatasetError(f"Invalid split assignment: {entry['split']}")
+            if self.manifest.get("distribution") == "participants" and entry["split"] == "test":
+                raise DatasetError("Participant manifest must not include test chunks.")
             folder = child_path(self.root, entry["path"])
             if Path(entry["path"]).parts[0] != entry["split"]:
                 raise DatasetError(f"Chunk path does not match its split: {entry['path']}")
@@ -52,17 +81,42 @@ class PredictionDataset:
                 raise DatasetError(f"Invalid frame numbers: {entry['chunk_id']}")
             if numbers != list(range(numbers[0], numbers[0] + len(frames))):
                 raise DatasetError(f"Nonconsecutive frames: {entry['chunk_id']}")
+            if version == 2:
+                video, chunk = entry["video_id"], entry["chunk_number"]
+                if (type(video) is not int or type(chunk) is not int
+                        or not 1 <= video <= 99 or not 1 <= chunk <= 99
+                        or video_registry.get(entry["recording_id"]) != video
+                        or entry.get("wave") not in self.manifest["waves"]
+                        or entry["path"] != f"{entry['split']}/{entry['chunk_id']}"
+                        or entry["chunk_id"] != f"{video:02d}{chunk:02d}"
+                        or numbers != list(range(1, len(frames) + 1))):
+                    raise DatasetError(f"Invalid chunk identity or local frame numbers: {entry['chunk_id']}")
+                source_numbers = [f["source_number"] for f in frames]
+                if (any(type(n) is not int or n < 0 for n in source_numbers)
+                        or source_numbers != list(range(source_numbers[0], source_numbers[0] + len(frames)))):
+                    raise DatasetError(f"Invalid source frame numbers: {entry['chunk_id']}")
+                for frame in frames:
+                    expected = photo_name(video, chunk, entry["split"], frame["number"], Path(frame["image"]).suffix)
+                    if frame["image"] != expected:
+                        raise DatasetError(f"Image name does not match manifest: {frame['image']}")
             for frame in frames:
-                key = (entry["source"], entry["recording_id"], frame["number"])
+                key = ((entry["recording_id"], frame["source_number"]) if version == 2 else
+                       (entry["source"], entry["recording_id"], frame["number"]))
                 if key in seen_frames:
                     raise DatasetError(f"Frame reused across chunks: {key}")
                 seen_frames.add(key)
-            if entry["split"] != split:
-                continue
             track_ids = entry["track_ids"]
             if (not track_ids or not all(isinstance(t, int) and not isinstance(t, bool) and t >= 0 for t in track_ids)
                     or len(track_ids) != len(set(track_ids))):
                 raise DatasetError(f"Invalid track IDs: {entry['chunk_id']}")
+            if version == 2:
+                expected_ids = [(entry["video_id"] * 100 + entry["chunk_number"]) * 1000 + local
+                                for local in range(1, len(track_ids) + 1)]
+                if len(track_ids) > 999 or track_ids != expected_ids or seen_tracks.intersection(track_ids):
+                    raise DatasetError(f"Fish IDs must be globally distinct per chunk: {entry['chunk_id']}")
+                seen_tracks.update(track_ids)
+            if entry["split"] != split:
+                continue
             names = [frame["image"] for frame in frames]
             if len(names) != len(set(names)):
                 raise DatasetError(f"Repeated image name: {entry['chunk_id']}")
@@ -107,6 +161,26 @@ class PredictionDataset:
     def __len__(self):
         return len(self.index)
 
+    def prediction_input(self, index):
+        """Return ten ordered image paths and alignment metadata, without labels.
+
+        The competition interface is fixed at 10 input and 10 output frames.
+        The configurable trajectory loader remains available for research.
+        """
+        if self.observed != 10 or self.future != 10:
+            raise DatasetError("Prediction inputs require observed=10 and future=10.")
+        chunk_index, start = self.index[index]
+        entry = self.chunks[chunk_index]["entry"]
+        frames = entry["frames"]
+        return {
+            "chunk_id": entry["chunk_id"],
+            "observed_frames": [f["number"] for f in frames[start:start + 10]],
+            "future_frames": [f["number"] for f in frames[start + 10:start + 20]],
+            "track_ids": entry["track_ids"][:],
+            "input_images": [str(child_path(self.root / entry["path"] / "images", f["image"]))
+                             for f in frames[start:start + 10]],
+        }
+
     def __getitem__(self, index):
         chunk_index, start = self.index[index]
         chunk = self.chunks[chunk_index]
@@ -119,11 +193,30 @@ class PredictionDataset:
                 "split": self.split, "fps": 30, "track_ids": entry["track_ids"][:],
                 "observed_frames": [f["number"] for f in entry["frames"][start:middle]],
                 "future_frames": [f["number"] for f in entry["frames"][middle:end]],
+                "input_images": [str(child_path(self.root / entry["path"] / "images", f["image"]))
+                                 for f in entry["frames"][start:middle]],
                 "observed": observed, "future": future}
 
     def __iter__(self):
         for index in range(len(self)):
             yield self[index]
+
+
+def predict_sample(dataset, index, predictor):
+    """Run a team's predictor on exactly ten images and validate its output.
+
+    predictor(images) receives ten encoded image byte strings in time order.
+    Decode/preprocess these inside the team's adapter as needed. Return Python
+    lists shaped [fish_count][10][2], in prediction_input(index)['track_ids']
+    order, in original-image pixels. No centers or future images reach predictor.
+    This utility supplies the interface and validation, not a trained model.
+    """
+    from prediction_format import validate_centers
+
+    inputs = dataset.prediction_input(index)
+    images = [Path(path).read_bytes() for path in inputs.pop("input_images")]
+    centers = validate_centers(predictor(images), len(inputs["track_ids"]))
+    return dict(inputs, predicted_centers=centers)
 
 
 def main():

@@ -42,7 +42,9 @@ def assign_splits(lengths, ratios=(70, 15, 15)):
     return ["train"] * i + ["validate"] * (j - i) + ["test"] * (len(lengths) - j)
 
 
-def plan_chunks(dataset_dirs, min_frames=30, ratios=(70, 15, 15)):
+def plan_chunks(dataset_dirs, min_frames=30, ratios=(70, 15, 15), split=None):
+    if split is not None and split not in SPLIT_NAMES:
+        raise DatasetError(f"Invalid split: {split}")
     positive_integer(min_frames, "Minimum chunk length")
     if min_frames < 20:
         raise DatasetError("Minimum chunk length must be at least 20 frames.")
@@ -75,21 +77,27 @@ def plan_chunks(dataset_dirs, min_frames=30, ratios=(70, 15, 15)):
                         f"{safe_sequence}_{first['number']:04d}-{last['number']:04d}")
             chunks.append({"chunk_id": chunk_id, "recording_id": first["sequence"],
                            "source": source_id, "frames": run})
-    assignments = assign_splits([len(chunk["frames"]) for chunk in chunks], ratios)
+    if not chunks:
+        raise DatasetError("No qualifying chunks found.")
+    assignments = ([split] * len(chunks) if split is not None else
+                   assign_splits([len(chunk["frames"]) for chunk in chunks], ratios))
     for chunk, split in zip(chunks, assignments):
         chunk["split"] = split
     return chunks, sources
 
 
-def export_chunks(dataset_dirs, output_dir, min_frames=30, ratios=(70, 15, 15)):
+def export_chunks(dataset_dirs, output_dir, min_frames=30, ratios=(70, 15, 15), split=None):
     output_dir = Path(output_dir)
     if output_dir.exists():
         raise DatasetError(f"Output already exists; choose a new directory: {output_dir}")
-    chunks, sources = plan_chunks(dataset_dirs, min_frames, ratios)
+    chunks, sources = plan_chunks(dataset_dirs, min_frames, ratios, split)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output_dir.name}.", dir=output_dir.parent) as temporary:
         staged = Path(temporary) / "dataset"
         manifest = write_export(chunks, sources, staged, min_frames, ratios)
+        if split is not None:
+            manifest["split_method"] = f"organizer-assigned {split}; whole chunks"
+            (staged / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         if output_dir.exists():
             raise DatasetError(f"Output appeared during export: {output_dir}")
         staged.rename(output_dir)
@@ -154,9 +162,11 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--min-frames", type=int, default=30)
     parser.add_argument("--ratios", nargs=3, type=float, default=(70, 15, 15), metavar=("TRAIN", "VALIDATE", "TEST"))
+    parser.add_argument("--split", choices=SPLIT_NAMES,
+                        help="Assign this entire new wave to one split (supports a single chunk)")
     args = parser.parse_args()
     try:
-        manifest = export_chunks(args.dataset_dirs, args.output, args.min_frames, args.ratios)
+        manifest = export_chunks(args.dataset_dirs, args.output, args.min_frames, args.ratios, args.split)
     except (DatasetError, OSError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1

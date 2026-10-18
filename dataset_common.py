@@ -180,3 +180,20 @@ def stable_runs(frames):
     if active:
         runs.append(active)
     return runs
+
+
+SPLIT_CODES = {"train": 1, "validate": 2, "test": 3}
+
+
+def photo_name(video, chunk, split, frame, extension):
+    """VV=video 01–99, CC=chunk 01–99, S=split 1/2/3, FFF=frame 001–999."""
+    for value, limit, label in ((video, 99, "Video"), (chunk, 99, "Chunk"), (frame, 999, "Frame")):
+        positive_integer(value, label)
+        if value > limit:
+            raise DatasetError(f"{label} exceeds filename capacity ({limit}).")
+    if split not in SPLIT_CODES:
+        raise DatasetError(f"Invalid split: {split}")
+    extension = extension.lower()
+    if extension not in (".jpg", ".jpeg", ".png"):
+        raise DatasetError(f"Unsupported photo extension: {extension}")
+    return f"{video:02d}{chunk:02d}{SPLIT_CODES[split]}{frame:03d}{extension}"
