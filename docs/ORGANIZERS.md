@@ -26,6 +26,15 @@ the minimum for a 10-image/10-target window. Default internal assignments target
 Ratios are approximate and need at least three usable chunks. Review the
 manifest, then freeze these assignments.
 
+Crop images and their labels together before chunking. Keep only visible boxes,
+clip boxes at the image edge, and recompute their centers from the clipped boxes.
+If cropping changes which fish are visible, split chunks at those membership
+changes. Match images and labels by the physical source frame: a renamed or
+reencoded crop can have a different frame-number offset. Cropped and full-frame
+copies of the same moment retain one source identity and split assignment.
+Apply the same crop when checking overlapping frames in a later wave. Changing
+the crop of an existing release requires a new reviewed revision.
+
 To assign an entire new wave explicitly, including a single chunk:
 
 ```bash
