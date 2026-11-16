@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 
-from dataset_common import (DatasetError, PREDICTION_SPLITS, SECTION_NAMES, SPLIT_NAMES,
+from dataset_common import (DatasetError, EXTRA_TEST_SECTION, PREDICTION_SPLITS, SECTION_NAMES, SPLIT_NAMES,
                             child_path, is_number, load_json, photo_name, positive_integer)
 
 
@@ -15,7 +15,8 @@ class PredictionDataset:
 
     observed/future have shape [fish_count][time_steps][2], ordered by track_ids.
     Samples are built on demand, in chunk/frame order. Coordinates are pixels.
-    Split names are train, validate, test, or public for a public-pool package.
+    Split names are train, validate, test, extra_test for a private supplemental
+    holdout, or public for a public-pool package.
     Defaults: 10 past, 10 future, stride 1. Public chunks shorter than the complete
     input/target window remain available as labeled data but supply no windows.
     This class also works as a map-style dataset for a PyTorch DataLoader with
@@ -57,14 +58,16 @@ class PredictionDataset:
                 video_registry[video["recording_id"]] = video["video_id"]
                 used_video_ids.add(video["video_id"])
         distribution = self.manifest.get("distribution")
-        if distribution in ("participants", "public") and split == "test":
+        if distribution in ("participants", "public") and split in ("test", EXTRA_TEST_SECTION):
             raise DatasetError("Test data is withheld from the public package.")
+        if split == EXTRA_TEST_SECTION and (version != 2 or distribution != "private"):
+            raise DatasetError("Extra test data requires a private organizer package.")
         if distribution == "public" and split != "public":
             raise DatasetError("This package contains one public pool; use split='public'.")
         if split == "public" and (version != 2 or distribution != "public"):
             raise DatasetError("split='public' requires a public-pool package.")
         allowed_sections = {
-            "private": SPLIT_NAMES + ("extra",),
+            "private": SPLIT_NAMES + ("extra", EXTRA_TEST_SECTION),
             "participants": ("train", "validate", "extra"),
             "public": ("public",),
         }.get(distribution, SPLIT_NAMES)
@@ -130,7 +133,7 @@ class PredictionDataset:
                 seen_tracks.update(track_ids)
             # Supplemental chunks need full label validation even though they
             # are never selected as an official prediction split.
-            if entry["split"] != split and entry["split"] != "extra":
+            if entry["split"] != split and entry["split"] not in ("extra", EXTRA_TEST_SECTION):
                 continue
             names = [frame["image"] for frame in frames]
             if len(names) != len(set(names)):

@@ -8,8 +8,9 @@ from pathlib import Path
 COCO_FILENAME = "_annotations.coco.json"
 SPLIT_NAMES = ("train", "validate", "test")
 # Official evaluation splits remain separate from the team's public data pool.
-PREDICTION_SPLITS = SPLIT_NAMES + ("public",)
-SECTION_NAMES = SPLIT_NAMES + ("extra", "public")
+EXTRA_TEST_SECTION = "extra_test"
+PREDICTION_SPLITS = SPLIT_NAMES + (EXTRA_TEST_SECTION, "public")
+SECTION_NAMES = SPLIT_NAMES + ("extra", EXTRA_TEST_SECTION, "public")
 FRAME_NAME = re.compile(r"^(.*?)-(\d+)\.[^.]+$")
 HASHED_NAME = re.compile(r"^(.*?-\d+)_\w+\.rf\.[^.]+\.(\w+)$")
 
@@ -185,13 +186,14 @@ def stable_runs(frames):
     return runs
 
 
-SPLIT_CODES = {"train": 1, "validate": 2, "test": 3, "extra": 4, "public": 4}
+SPLIT_CODES = {"train": 1, "validate": 2, "test": 3, EXTRA_TEST_SECTION: 3, "extra": 4, "public": 4}
 
 
 def photo_name(video, chunk, split, frame, extension):
     """VV=video 01–99, CC=chunk 01–99, S=section 1/2/3/4, FFF=001–999.
 
-    Section 4 identifies the public pool or organizer-side supplemental frames.
+    Section 4 identifies public/additional data; section 3 also identifies a
+    private supplemental holdout stored separately as extra_test.
     """
     for value, limit, label in ((video, 99, "Video"), (chunk, 99, "Chunk"), (frame, 999, "Frame")):
         positive_integer(value, label)

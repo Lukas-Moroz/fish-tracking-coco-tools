@@ -64,6 +64,13 @@ def _write_manifest(root, manifest):
         manifest["extra_counts"] = {"chunks": len(extras), "frames": sum(c["frame_count"] for c in extras)}
     else:
         manifest.pop("extra_counts", None)
+    reserved = [c for c in manifest["chunks"] if c["split"] == "extra_test"]
+    if reserved:
+        manifest["extra_test_counts"] = {
+            "chunks": len(reserved), "frames": sum(c["frame_count"] for c in reserved),
+            "prediction_windows_10_10_stride_1": sum(max(0, c["frame_count"] - 19) for c in reserved)}
+    else:
+        manifest.pop("extra_test_counts", None)
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     public_pool = manifest["distribution"] == "public"
     (root / "README.txt").write_text(
@@ -80,7 +87,7 @@ def _write_manifest(root, manifest):
            if public_pool else
            "Use the fixed official splits. Additional code4 frames, when present, live in extra/.\n"
            + ("Private organizer data includes withheld test images and labels.\n"
-              if manifest["distribution"] == "private" else "Legacy participant package: test data is withheld.\n")),
+              if manifest["distribution"] == "private" else "Participant package: all private holdouts are withheld.\n")),
         encoding="utf-8")
 
 
@@ -202,7 +209,9 @@ def export_participant_package(private_dir, output_dir):
     if manifest.get("schema_version") != 2 or manifest.get("distribution") != "private":
         raise DatasetError("Participant export requires a private version-2 release.")
     manifest["distribution"] = "participants"
-    manifest["chunks"] = [c for c in manifest["chunks"] if c["split"] != "test"]
+    manifest["chunks"] = [c for c in manifest["chunks"] if c["split"] not in ("test", "extra_test")]
+    manifest.pop("extra_test_counts", None)
+    manifest.pop("extra_test_policy", None)
     if not manifest["chunks"]:
         raise DatasetError("No training or validation chunks to distribute.")
     for entry in manifest["chunks"]:
@@ -331,17 +340,84 @@ def add_extra_release(dataset_dir, output_dir, release_id, previous, excluded_re
     return _stage_output(output_dir, write)
 
 
-def export_public_pool(private_dir, output_dir):
-    """Export every non-test frame to one public section using filename code4."""
+def reserve_extra_chunks(private_dir, output_dir, release_id, chunk_ids):
+    """Reserve selected whole supplemental chunks without altering official splits.
+
+    Reserved supplemental images use section 'extra_test' and filename code3.
+    Their counts remain separate from the official test benchmark.
+    """
+    if not isinstance(release_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", release_id):
+        raise DatasetError("Invalid release_id.")
+    manifest = _validate_dataset(private_dir)
+    if manifest.get("schema_version") != 2 or manifest.get("distribution") != "private":
+        raise DatasetError("Supplemental reserve requires a private version-2 release.")
+    if release_id in manifest["waves"]:
+        raise DatasetError(f"Release name already used: {release_id}")
+    selected_list = list(chunk_ids)
+    if (not selected_list or any(not isinstance(c, str) for c in selected_list)
+            or len(set(selected_list)) != len(selected_list)):
+        raise DatasetError("Select distinct supplemental chunk IDs.")
+    selected = set(selected_list)
+    eligible = {c["chunk_id"] for c in manifest["chunks"] if c["split"] == "extra"}
+    if selected - eligible:
+        raise DatasetError(f"Only existing extra chunks can be reserved: {sorted(selected - eligible)}")
+    originals = copy.deepcopy(manifest["chunks"])
+    source_release = manifest["release_id"]
+    source_extra_frames = sum(c["frame_count"] for c in originals if c["split"] == "extra")
+    reserved_frames = sum(c["frame_count"] for c in originals if c["chunk_id"] in selected)
+    manifest["release_id"] = release_id
+    manifest["waves"].append(release_id)
+    manifest["extra_test_policy"] = {
+        "source_release": source_release,
+        "reserved_chunk_ids": sorted(selected), "reserved_frames": reserved_frames,
+        "source_extra_frames": source_extra_frames,
+        "fraction_of_source_extra_frames": reserved_frames / source_extra_frames,
+        "purpose": "additional supplemental holdout; official test unchanged"}
+    for entry in manifest["chunks"]:
+        if entry["chunk_id"] not in selected:
+            continue
+        entry["split"] = "extra_test"
+        entry["path"] = f"extra_test/{entry['chunk_id']}"
+        for frame in entry["frames"]:
+            frame["image"] = photo_name(entry["video_id"], entry["chunk_number"], "extra_test",
+                                        frame["number"], Path(frame["image"]).suffix)
+
+    def write(staged):
+        for original, entry in zip(originals, manifest["chunks"]):
+            if entry["chunk_id"] not in selected:
+                _copy_chunk(private_dir, original, staged)
+                continue
+            source = child_path(private_dir, original["path"])
+            folder = staged / entry["path"]
+            (folder / "images").mkdir(parents=True)
+            names = {}
+            for before, after in zip(original["frames"], entry["frames"]):
+                names[before["image"]] = after["image"]
+                shutil.copy2(child_path(source / "images", before["image"]), folder / "images" / after["image"])
+            records = load_json(source / "annotations.json")
+            for record in records:
+                record["image"] = names[record["image"]]
+            (folder / "annotations.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+        _write_manifest(staged, manifest)
+        return manifest
+
+    return _stage_output(output_dir, write)
+
+
+def export_public_pool(private_dir, output_dir, sections=None):
+    """Export non-reserved frames to code4; optionally choose source sections."""
     manifest = _validate_dataset(private_dir)
     if manifest.get("schema_version") != 2 or manifest.get("distribution") != "private":
         raise DatasetError("Public export requires a private version-2 release.")
-    originals = [copy.deepcopy(c) for c in manifest["chunks"] if c["split"] != "test"]
+    chosen_sections = {"train", "validate", "extra"} if sections is None else set(sections)
+    if not chosen_sections or chosen_sections - {"train", "validate", "extra"}:
+        raise DatasetError("Public export sections may be train, validate, or extra; test data is withheld.")
+    originals = [copy.deepcopy(c) for c in manifest["chunks"] if c["split"] in chosen_sections]
     if not originals:
         raise DatasetError("No non-test chunks to distribute.")
     manifest["distribution"] = "public"
     for key in ("target_ratios", "requested_ratios", "min_chunk_frames", "extra_section",
-                "extra_excluded_recordings", "extra_counts"):
+                "extra_excluded_recordings", "extra_counts", "extra_test_counts", "extra_test_policy"):
         manifest.pop(key, None)
     manifest["split_method"] = "single public pool; teams choose usage; private test withheld"
     manifest["chunks"] = []
@@ -385,7 +461,7 @@ def main():
     build.add_argument("--output", required=True, type=Path)
     build.add_argument("--release-id", required=True)
     build.add_argument("--previous", type=Path)
-    public = subparsers.add_parser("participants", help="Export training/validation only")
+    public = subparsers.add_parser("participants", help="Export training, validation, and released supplements")
     public.add_argument("dataset", type=Path)
     public.add_argument("--output", required=True, type=Path)
     extra = subparsers.add_parser("extra", help="Add previously unassigned frames with code4")
@@ -397,6 +473,13 @@ def main():
     pool = subparsers.add_parser("public", help="Export one code4 public pool, withholding test")
     pool.add_argument("dataset", type=Path)
     pool.add_argument("--output", required=True, type=Path)
+    pool.add_argument("--section", choices=("train", "validate", "extra"), action="append",
+                      help="Optionally export only selected sections; use --section extra for a supplemental-only pool")
+    reserve = subparsers.add_parser("reserve-extra", help="Reserve selected supplemental chunks as private code3 data")
+    reserve.add_argument("dataset", type=Path)
+    reserve.add_argument("--output", required=True, type=Path)
+    reserve.add_argument("--release-id", required=True)
+    reserve.add_argument("--chunk-id", action="append", required=True)
     args = parser.parse_args()
     try:
         if args.command == "build":
@@ -405,7 +488,9 @@ def main():
             result = add_extra_release(args.dataset, args.output, args.release_id, args.previous,
                                        args.exclude_recording)
         elif args.command == "public":
-            result = export_public_pool(args.dataset, args.output)
+            result = export_public_pool(args.dataset, args.output, args.section)
+        elif args.command == "reserve-extra":
+            result = reserve_extra_chunks(args.dataset, args.output, args.release_id, args.chunk_id)
         else:
             result = export_participant_package(args.dataset, args.output)
         print(f"{result['release_id']}: {len(result['chunks'])} chunks ({result['distribution']}) -> {args.output}")
