@@ -6,7 +6,8 @@ import math
 import sys
 from pathlib import Path
 
-from dataset_common import DatasetError, SPLIT_NAMES, child_path, is_number, load_json, photo_name, positive_integer
+from dataset_common import (DatasetError, PREDICTION_SPLITS, SECTION_NAMES, SPLIT_NAMES,
+                            child_path, is_number, load_json, photo_name, positive_integer)
 
 
 class PredictionDataset:
@@ -14,13 +15,15 @@ class PredictionDataset:
 
     observed/future have shape [fish_count][time_steps][2], ordered by track_ids.
     Samples are built on demand, in chunk/frame order. Coordinates are pixels.
-    Split names are train, validate, test. Defaults: 10 past, 10 future, stride 1.
+    Split names are train, validate, test, or public for a public-pool package.
+    Defaults: 10 past, 10 future, stride 1. Public chunks shorter than the complete
+    input/target window remain available as labeled data but supply no windows.
     This class also works as a map-style dataset for a PyTorch DataLoader with
     an appropriate collate function for variable fish counts.
     """
 
     def __init__(self, dataset_dir, split, observed=10, future=10, stride=1):
-        if split not in SPLIT_NAMES:
+        if split not in PREDICTION_SPLITS:
             raise DatasetError(f"Unknown split: {split}")
         for value, label in ((observed, "Observed length"), (future, "Future length"), (stride, "Stride")):
             positive_integer(value, label)
@@ -34,7 +37,7 @@ class PredictionDataset:
             raise DatasetError("Expected schema_version=1 or 2 and fps=30.")
         if version == 2 and (self.manifest.get("filename_format") != "VVCCSFFF"
                              or self.manifest.get("track_id_scope") != "globally_unique_per_chunk"
-                             or self.manifest.get("distribution") not in ("private", "participants")
+                             or self.manifest.get("distribution") not in ("private", "participants", "public")
                              or not isinstance(self.manifest.get("release_id"), str)):
             raise DatasetError("Invalid version-2 release metadata.")
         video_registry = {}
@@ -53,8 +56,18 @@ class PredictionDataset:
                     raise DatasetError("Video IDs and recording names must be distinct in the registry.")
                 video_registry[video["recording_id"]] = video["video_id"]
                 used_video_ids.add(video["video_id"])
-        if self.manifest.get("distribution") == "participants" and split == "test":
-            raise DatasetError("Test data is withheld from the participant package.")
+        distribution = self.manifest.get("distribution")
+        if distribution in ("participants", "public") and split == "test":
+            raise DatasetError("Test data is withheld from the public package.")
+        if distribution == "public" and split != "public":
+            raise DatasetError("This package contains one public pool; use split='public'.")
+        if split == "public" and (version != 2 or distribution != "public"):
+            raise DatasetError("split='public' requires a public-pool package.")
+        allowed_sections = {
+            "private": SPLIT_NAMES + ("extra",),
+            "participants": ("train", "validate", "extra"),
+            "public": ("public",),
+        }.get(distribution, SPLIT_NAMES)
         self.chunks, self.index = [], []
         seen_paths, seen_frames, seen_tracks, seen_chunks = set(), set(), set(), set()
         # Validate all manifest chunks so a split-specific loader also catches
@@ -63,10 +76,10 @@ class PredictionDataset:
             if entry["chunk_id"] in seen_chunks:
                 raise DatasetError(f"Repeated chunk ID: {entry['chunk_id']}")
             seen_chunks.add(entry["chunk_id"])
-            if entry["split"] not in SPLIT_NAMES:
+            if entry["split"] not in SECTION_NAMES:
                 raise DatasetError(f"Invalid split assignment: {entry['split']}")
-            if self.manifest.get("distribution") == "participants" and entry["split"] == "test":
-                raise DatasetError("Participant manifest must not include test chunks.")
+            if entry["split"] not in allowed_sections:
+                raise DatasetError(f"Invalid section for {distribution or 'legacy'} package: {entry['split']}")
             folder = child_path(self.root, entry["path"])
             if Path(entry["path"]).parts[0] != entry["split"]:
                 raise DatasetError(f"Chunk path does not match its split: {entry['path']}")
@@ -115,7 +128,9 @@ class PredictionDataset:
                 if len(track_ids) > 999 or track_ids != expected_ids or seen_tracks.intersection(track_ids):
                     raise DatasetError(f"Fish IDs must be globally distinct per chunk: {entry['chunk_id']}")
                 seen_tracks.update(track_ids)
-            if entry["split"] != split:
+            # Supplemental chunks need full label validation even though they
+            # are never selected as an official prediction split.
+            if entry["split"] != split and entry["split"] != "extra":
                 continue
             names = [frame["image"] for frame in frames]
             if len(names) != len(set(names)):
@@ -152,6 +167,8 @@ class PredictionDataset:
                 image = child_path(folder / "images", name)
                 if not image.is_file():
                     raise DatasetError(f"Missing photo: {image}")
+            if entry["split"] != split:
+                continue
             trajectories = [[positions[name][track_id] for name in names] for track_id in track_ids]
             chunk_index = len(self.chunks)
             self.chunks.append({"entry": entry, "trajectories": trajectories})
@@ -222,7 +239,7 @@ def predict_sample(dataset, index, predictor):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset_dir", type=Path)
-    parser.add_argument("--split", required=True, choices=SPLIT_NAMES)
+    parser.add_argument("--split", required=True, choices=PREDICTION_SPLITS)
     parser.add_argument("--observed", type=int, default=10)
     parser.add_argument("--future", type=int, default=10)
     parser.add_argument("--stride", type=int, default=1)

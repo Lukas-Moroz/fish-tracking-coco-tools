@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from dataset_common import DatasetError, SPLIT_NAMES, is_number, load_json
+from dataset_common import DatasetError, PREDICTION_SPLITS, is_number, load_json
 
 
 def validate_centers(centers, fish_count):
@@ -109,7 +109,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
-    parser.add_argument("--split", required=True, choices=SPLIT_NAMES)
+    parser.add_argument("--split", required=True, choices=PREDICTION_SPLITS)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
