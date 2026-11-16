@@ -2,9 +2,12 @@
 
 The task takes **10 consecutive input images** and produces the **next 10
 centerpoints per fish**. Frames are sampled at 30 FPS. Points are `[x, y]` in
-original-image pixels, with x rightward and y downward from the top-left corner.
-Targets are bounding-box midpoints. Convert resized or cropped model outputs
-back to original-image coordinates before submission.
+pixels of the released dataset images, with x rightward and y downward from the
+top-left corner. Targets are bounding-box midpoints. Organizer crops apply to
+official prediction images and labels as well as supplemental data. If a model
+resizes or further crops an input, convert its outputs back to the released
+image's coordinates before submission. The manifest records organizer image
+transforms when present.
 
 The established train/validation package retains its original split names.
 Teams can also use a supplemental-only package of code-`4` data. Both official

@@ -228,7 +228,7 @@ def predict_sample(dataset, index, predictor):
     predictor(images) receives ten encoded image byte strings in time order.
     Decode/preprocess these inside the team's adapter as needed. Return Python
     lists shaped [fish_count][10][2], in prediction_input(index)['track_ids']
-    order, in original-image pixels. No centers or future images reach predictor.
+    order, in pixels of the released image. No centers or future images reach predictor.
     This utility supplies the interface and validation, not a trained model.
     """
     from prediction_format import validate_centers

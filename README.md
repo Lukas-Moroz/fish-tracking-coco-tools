@@ -45,7 +45,8 @@ supplement/
 ```
 
 The export uses `distribution="public"` and `split="public"` for its selected
-shared data. Image bytes, original resolution, boxes, and centers are preserved.
+shared data. Exports preserve the prepared image bytes, resolution, boxes, and
+centers. Coordinates refer to the released images, including organizer crops.
 The existing train/validate package remains usable with its original split names.
 
 ## Try the synthetic example
@@ -87,7 +88,7 @@ A chunk with `N` frames provides `max(0, N - 19)` prediction windows at stride 1
 Windows never cross chunks. Chunks shorter than 20 frames remain available for
 detection/tracking through their images and annotation JSON, but supply no
 10-input/10-target windows. Fish counts may vary between chunks. Coordinates
-always use original-image pixels.
+always use pixels of the released images.
 
 ## Standardize prediction JSON
 
